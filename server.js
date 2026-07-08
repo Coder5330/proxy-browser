@@ -20,7 +20,7 @@ const cheerio = require('cheerio');
 const { URL } = require('url');
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 function proxify(rawUrl, baseUrl) {
   try {
@@ -86,6 +86,9 @@ app.get('/browse', async (req, res) => {
   });
   $('form[action]').each((_, el) => {
     $(el).attr('action', proxify($(el).attr('action'), target));
+  });
+  $('iframe[src]').each((_, el) => {
+    $(el).attr('src', proxify($(el).attr('src'), target));
   });
 
   res.set('content-type', 'text/html');
