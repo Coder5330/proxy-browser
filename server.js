@@ -14,7 +14,6 @@
  *
  * Uses Node's built-in global fetch — no node-fetch package needed.
  */
-
 const express = require('express');
 const cheerio = require('cheerio');
 const { URL } = require('url');
@@ -51,7 +50,6 @@ app.get('/browse', async (req, res) => {
   }
 
   const contentType = response.headers.get('content-type') || '';
-
   if (!contentType.includes('text/html')) {
     res.set('content-type', contentType);
     const buffer = Buffer.from(await response.arrayBuffer());
