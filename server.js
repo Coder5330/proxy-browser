@@ -1,16 +1,11 @@
 /**
- * Simple server-side web proxy.
+ * Simple server-side web proxy (with bare-path recovery).
  *
- * How it works:
- * 1. User visits  http://localhost:3000/browse?url=https://example.com
- * 2. OUR server fetches that page (server-to-server request — no browser
- *    involved, so the target's X-Frame-Options is irrelevant).
- * 3. We rewrite the HTML so links, forms, images, and stylesheets point
- *    back through our own /browse?url=... route instead of the original
- *    domain.
- * 4. We send the rewritten HTML to the user's browser, served from OUR
- *    origin (localhost:3000). The browser never talks to the target site
- *    directly, so there's nothing for X-Frame-Options to block.
+ * The `?url=` design has one blind spot: when a page's JavaScript navigates
+ * to an absolute path (e.g. auth-guard.js doing window.location='/auth/...'),
+ * the browser requests that path from OUR origin (localhost:3000), not through
+ * /browse. To recover, we remember the current site's origin in a cookie and
+ * add a catch-all route that re-proxies any stray bare path back through /browse.
  *
  * Uses Node's built-in global fetch — no node-fetch package needed.
  */
@@ -28,6 +23,13 @@ function proxify(rawUrl, baseUrl) {
   } catch {
     return rawUrl;
   }
+}
+
+// Minimal cookie reader (avoids adding cookie-parser as a dependency).
+function getCookie(req, name) {
+  const raw = req.headers.cookie || '';
+  const match = raw.split(';').map((c) => c.trim()).find((c) => c.startsWith(name + '='));
+  return match ? decodeURIComponent(match.slice(name.length + 1)) : null;
 }
 
 app.get('/browse', async (req, res) => {
@@ -49,6 +51,15 @@ app.get('/browse', async (req, res) => {
     );
   }
 
+  // Use the URL *after* redirects as the base for resolving relative links.
+  const finalUrl = response.url || target;
+  const origin = new URL(finalUrl).origin;
+
+  // Remember this origin so the catch-all route can rebuild stray bare paths.
+  res.cookie
+    ? res.cookie('proxy_origin', origin, { path: '/' })
+    : res.setHeader('Set-Cookie', `proxy_origin=${encodeURIComponent(origin)}; Path=/`);
+
   const contentType = response.headers.get('content-type') || '';
   if (!contentType.includes('text/html')) {
     res.set('content-type', contentType);
@@ -60,10 +71,10 @@ app.get('/browse', async (req, res) => {
   const $ = cheerio.load(html);
 
   $('a[href]').each((_, el) => {
-    $(el).attr('href', proxify($(el).attr('href'), target));
+    $(el).attr('href', proxify($(el).attr('href'), finalUrl));
   });
   $('img[src]').each((_, el) => {
-    $(el).attr('src', proxify($(el).attr('src'), target));
+    $(el).attr('src', proxify($(el).attr('src'), finalUrl));
   });
   $('img[srcset]').each((_, el) => {
     const rewritten = $(el)
@@ -71,22 +82,22 @@ app.get('/browse', async (req, res) => {
       .split(',')
       .map((part) => {
         const [url, descriptor] = part.trim().split(/\s+/);
-        return [proxify(url, target), descriptor].filter(Boolean).join(' ');
+        return [proxify(url, finalUrl), descriptor].filter(Boolean).join(' ');
       })
       .join(', ');
     $(el).attr('srcset', rewritten);
   });
   $('link[href]').each((_, el) => {
-    $(el).attr('href', proxify($(el).attr('href'), target));
+    $(el).attr('href', proxify($(el).attr('href'), finalUrl));
   });
   $('script[src]').each((_, el) => {
-    $(el).attr('src', proxify($(el).attr('src'), target));
+    $(el).attr('src', proxify($(el).attr('src'), finalUrl));
   });
   $('form[action]').each((_, el) => {
-    $(el).attr('action', proxify($(el).attr('action'), target));
+    $(el).attr('action', proxify($(el).attr('action'), finalUrl));
   });
   $('iframe[src]').each((_, el) => {
-    $(el).attr('src', proxify($(el).attr('src'), target));
+    $(el).attr('src', proxify($(el).attr('src'), finalUrl));
   });
 
   res.set('content-type', 'text/html');
@@ -101,6 +112,17 @@ app.get('/', (req, res) => {
       <button type="submit">Go</button>
     </form>
   `);
+});
+
+// Catch-all: any stray bare path (e.g. from a JS redirect) gets rebuilt into
+// a full URL using the remembered origin and re-proxied through /browse.
+app.use((req, res) => {
+  const origin = getCookie(req, 'proxy_origin');
+  if (origin) {
+    const rebuilt = origin + req.originalUrl;
+    return res.redirect('/browse?url=' + encodeURIComponent(rebuilt));
+  }
+  res.status(404).send('Not found (no proxy origin set — start from / and enter a URL).');
 });
 
 app.listen(PORT, () => {
